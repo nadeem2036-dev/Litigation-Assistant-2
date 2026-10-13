@@ -1,0 +1,27 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Accounts collection for username/password authentication & profile
+    match /accounts/{username} {
+      allow read: if true;
+      allow create, update: if request.resource.data.username == username;
+      allow delete: if false;
+
+      // Cases stored per username for cross-device access
+      match /cases/{caseId} {
+        allow read: if true;
+        allow write: if request.resource.data.username == username || request.method == 'delete';
+      }
+    }
+
+    // Email-to-username index for account recovery
+    match /recovery_emails/{email} {
+      allow read, write: if true;
+    }
+  }
+}

@@ -1,0 +1,199 @@
+{
+  "entities": {
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "User login credential and profile for multi-device cross-browser synchronization",
+      "type": "object",
+      "properties": {
+        "username": {
+          "type": "string",
+          "description": "Unique username used for login across devices",
+          "minLength": 3,
+          "maxLength": 64
+        },
+        "passwordHash": {
+          "type": "string",
+          "description": "SHA-256 salted password hash for secure authentication",
+          "maxLength": 128
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Registered email address for account and password recovery",
+          "maxLength": 150
+        },
+        "recoveryCode": {
+          "type": "string",
+          "description": "Temporary 6-digit recovery code for password reset",
+          "maxLength": 10
+        },
+        "recoveryExpires": {
+          "type": "string",
+          "description": "ISO timestamp when the recovery code expires"
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name of the user or advocate",
+          "maxLength": 120
+        },
+        "honorific": {
+          "type": "string",
+          "description": "User title e.g. Mr., Ms., Barrister, Advocate",
+          "maxLength": 30
+        },
+        "district": {
+          "type": "string",
+          "description": "District in Khyber Pakhtunkhwa",
+          "maxLength": 50
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp of account registration"
+        },
+        "lastLogin": {
+          "type": "string",
+          "description": "ISO timestamp of last login"
+        }
+      },
+      "required": ["username", "passwordHash", "email", "name", "district"]
+    },
+    "RecoveryRecord": {
+      "title": "RecoveryRecord",
+      "description": "Email-to-username index and recovery code storage",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Normalized email address",
+          "maxLength": 150
+        },
+        "username": {
+          "type": "string",
+          "description": "Username associated with this email address",
+          "maxLength": 64
+        },
+        "recoveryCode": {
+          "type": "string",
+          "description": "Active 6-digit recovery code",
+          "maxLength": 10
+        },
+        "expiresAt": {
+          "type": "string",
+          "description": "ISO timestamp of code expiration"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of last update"
+        }
+      },
+      "required": ["email", "username"]
+    },
+    "UserCase": {
+      "title": "UserCase",
+      "description": "Individual court case stored under a user account",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique ID of the court case",
+          "maxLength": 100
+        },
+        "username": {
+          "type": "string",
+          "description": "Owner username of this court case record",
+          "maxLength": 64
+        },
+        "court": {
+          "type": "string",
+          "description": "Court forum e.g. KPST or PHC",
+          "maxLength": 50
+        },
+        "appealNo": {
+          "type": "string",
+          "description": "Service Appeal Number",
+          "maxLength": 30
+        },
+        "year": {
+          "type": "string",
+          "description": "Year of the appeal",
+          "maxLength": 10
+        },
+        "caseTitle": {
+          "type": "string",
+          "description": "Title of the case / Parties involved",
+          "maxLength": 200
+        },
+        "department": {
+          "type": "string",
+          "description": "Government Department name",
+          "maxLength": 150
+        },
+        "bench": {
+          "type": "string",
+          "description": "Tribunal Bench e.g. SB Zia ul Haq, DB-I",
+          "maxLength": 200
+        },
+        "advocateName": {
+          "type": "string",
+          "description": "Name of the practicing advocate or counsel",
+          "maxLength": 150
+        },
+        "natureOfCase": {
+          "type": "string",
+          "description": "Nature of case matter e.g. Promotion, Seniority, Pension",
+          "maxLength": 150
+        },
+        "decision": {
+          "type": "string",
+          "description": "Status or decision of the case",
+          "maxLength": 100
+        },
+        "decidedOn": {
+          "type": "string",
+          "description": "Date of decision if decided",
+          "maxLength": 50
+        },
+        "nextDate": {
+          "type": "string",
+          "description": "Next scheduled court hearing date",
+          "maxLength": 50
+        },
+        "causeListSrNo": {
+          "type": "string",
+          "description": "Serial number in the published cause list",
+          "maxLength": 20
+        },
+        "causeListBench": {
+          "type": "string",
+          "description": "Bench description from published cause list",
+          "maxLength": 250
+        },
+        "placeOfHearing": {
+          "type": "string",
+          "description": "Circuit Bench / Registry location",
+          "maxLength": 50
+        },
+        "lastUpdated": {
+          "type": "string",
+          "description": "ISO timestamp of last update"
+        }
+      },
+      "required": ["id", "username", "appealNo", "year", "caseTitle"]
+    }
+  },
+  "firestore": {
+    "/accounts/{username}": {
+      "schema": "UserAccount",
+      "description": "User account credentials and profile indexed by unique username"
+    },
+    "/recovery_emails/{email}": {
+      "schema": "RecoveryRecord",
+      "description": "Email-to-username index and recovery code storage"
+    },
+    "/accounts/{username}/cases/{caseId}": {
+      "schema": "UserCase",
+      "description": "All court cases tracked by the specified username"
+    }
+  }
+}

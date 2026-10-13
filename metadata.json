@@ -1,0 +1,8 @@
+{
+  "name": "Litigation Assistant",
+  "description": "Litigation Assistant for Khyber Pakhtunkhwa Services Tribunal (KPST) & Peshawar High Court with comprehensive case search, hearing date alerts, cause list monitoring, judgment downloads, and offline access.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

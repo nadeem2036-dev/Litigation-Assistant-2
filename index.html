@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script>
+      // Gracefully handle Vite HMR WebSocket in cloud preview environment (HMR is disabled in AI Studio)
+      if (typeof window !== 'undefined' && window.WebSocket) {
+        const _OrigWS = window.WebSocket;
+        window.WebSocket = function (url, protocols) {
+          const isViteHmr =
+            protocols === 'vite-hmr' ||
+            (Array.isArray(protocols) && protocols.includes('vite-hmr')) ||
+            (typeof url === 'string' && (url.includes('token=') || url.includes('vite-hmr')));
+          if (isViteHmr) {
+            const fake = new EventTarget();
+            fake.readyState = 1;
+            fake.OPEN = 1;
+            fake.CLOSED = 3;
+            fake.CONNECTING = 0;
+            fake.CLOSING = 2;
+            fake.send = function () {};
+            fake.close = function () {};
+            setTimeout(() => {
+              fake.dispatchEvent(new Event('open'));
+            }, 0);
+            return fake;
+          }
+          return new _OrigWS(url, protocols);
+        };
+        window.WebSocket.prototype = _OrigWS.prototype;
+        window.WebSocket.CONNECTING = 0;
+        window.WebSocket.OPEN = 1;
+        window.WebSocket.CLOSING = 2;
+        window.WebSocket.CLOSED = 3;
+      }
+    </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Litigation Assistant</title>
+    <meta name="description" content="Litigation Assistant for Khyber Pakhtunkhwa Services Tribunal (KPST) &amp; Peshawar High Court with comprehensive case search, hearing date alerts, cause list monitoring, judgment downloads, and offline access." />
+    <meta property="og:title" content="Litigation Assistant" />
+    <meta property="og:description" content="Litigation Assistant for Khyber Pakhtunkhwa Services Tribunal (KPST) &amp; Peshawar High Court with comprehensive case search, hearing date alerts, cause list monitoring, judgment downloads, and offline access." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#064e3b" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Litigation Assistant" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.json" />
+    <script>
+      // Automatic Service Worker Registration for PWA Standalone Capability
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js', { scope: '/' })
+            .then((registration) => {
+              console.log('[PWA] Service Worker registered successfully, scope:', registration.scope);
+            })
+            .catch((error) => {
+              console.warn('[PWA] Service Worker registration failed:', error);
+            });
+        });
+      }
+    </script>
+  </head>
+  <body class="bg-slate-100 text-slate-900 antialiased selection:bg-emerald-600 selection:text-white">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
