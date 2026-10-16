@@ -37,6 +37,8 @@ export const AddCaseModal: React.FC<AddCaseModalProps> = ({
   const [bench, setBench] = useState('SB');
   const [causeListBench, setCauseListBench] = useState('');
   const [causeListSrNo, setCauseListSrNo] = useState('');
+  const [justiceName, setJusticeName] = useState('');
+  const [courtRoom, setCourtRoom] = useState('');
   const [advocateName, setAdvocateName] = useState('');
   const [department, setDepartment] = useState('');
   const [placeOfHearing, setPlaceOfHearing] = useState<'Peshawar' | 'Swat' | 'D.I Khan' | 'Abbottabad'>('Peshawar');
@@ -61,6 +63,8 @@ export const AddCaseModal: React.FC<AddCaseModalProps> = ({
     nextDate: string;
     causeListSrNo: string;
     causeListBench: string;
+    justiceName?: string;
+    courtRoom?: string;
     placeOfHearing: string;
     court: string;
     notes?: string;
@@ -108,14 +112,26 @@ export const AddCaseModal: React.FC<AddCaseModalProps> = ({
         if (data.success && Array.isArray(data.cases) && data.cases.length > 0) {
           if (data.cases.length === 1) {
             // Exactly 1 case matched
-            applyCaseDetails(data.cases[0]);
-            setFetchStatusMessage('Case details, cause list, and bench verified from Peshawar High Court portals!');
+            const c = data.cases[0];
+            applyCaseDetails(c);
+            if (c.causeListSrNo || c.justiceName) {
+              setFetchStatusMessage(
+                `Verified from PHC Current Cause List! Fixed on: ${c.nextDate} | Court: ${c.courtRoom || 'Court Room 1'} | Hon. ${c.justiceName || 'Justice'} (Sr. #${c.causeListSrNo || '1'})`
+              );
+            } else {
+              setFetchStatusMessage('Case details verified from Peshawar High Court portals!');
+            }
           } else {
             // Multiple case types matched (e.g. W.P. vs C.R. vs Cr.M)
             setPhcMatches(data.cases);
             setSelectedPhcMatchId(data.cases[0].id);
             applyCaseDetails(data.cases[0]);
-            setFetchStatusMessage(`Found ${data.cases.length} cases with #${appealNo}/${year}. Please select yours below:`);
+            const matchedOnList = data.cases.find((c: any) => c.causeListSrNo || c.nextDate);
+            setFetchStatusMessage(
+              matchedOnList
+                ? `Found ${data.cases.length} cases (#${appealNo}/${year}). Cause list match: ${matchedOnList.appealNo} fixed on ${matchedOnList.nextDate} before ${matchedOnList.justiceName} (${matchedOnList.courtRoom}, Sr. #${matchedOnList.causeListSrNo}). Please select your case below:`
+                : `Found ${data.cases.length} cases with #${appealNo}/${year}. Please select yours below:`
+            );
           }
           setShowOptionalFields(true);
         } else {
@@ -178,6 +194,8 @@ export const AddCaseModal: React.FC<AddCaseModalProps> = ({
     if (ext.advocateName) setAdvocateName(ext.advocateName);
     if (ext.causeListBench) setCauseListBench(ext.causeListBench);
     if (ext.causeListSrNo) setCauseListSrNo(ext.causeListSrNo);
+    if (ext.justiceName) setJusticeName(ext.justiceName);
+    if (ext.courtRoom) setCourtRoom(ext.courtRoom);
     if (ext.appealNo && ext.court === 'PHC') setAppealNo(ext.appealNo);
   };
 
@@ -218,6 +236,8 @@ export const AddCaseModal: React.FC<AddCaseModalProps> = ({
     let finalBench = bench.trim();
     let finalCauseListBench = causeListBench.trim();
     let finalCauseListSrNo = causeListSrNo.trim();
+    let finalJusticeName = justiceName.trim();
+    let finalCourtRoom = courtRoom.trim();
     let finalAdvocate = advocateName.trim();
 
     // Default fallbacks if empty (Requirement 2: Extract respondent department)
@@ -244,6 +264,8 @@ export const AddCaseModal: React.FC<AddCaseModalProps> = ({
       caseTitle: finalTitle,
       department: finalDept,
       bench: finalBench || (courtType === 'PHC' ? 'Single Bench (SB)' : 'SB'),
+      justiceName: finalJusticeName,
+      courtRoom: finalCourtRoom,
       advocateName: finalAdvocate,
       natureOfCase: finalNature,
       decision: finalDecision,
@@ -268,6 +290,8 @@ export const AddCaseModal: React.FC<AddCaseModalProps> = ({
     setDepartment('');
     setCauseListBench('');
     setCauseListSrNo('');
+    setJusticeName('');
+    setCourtRoom('');
     setAdvocateName('');
     setPhcMatches([]);
     onClose();
@@ -511,11 +535,11 @@ export const AddCaseModal: React.FC<AddCaseModalProps> = ({
                 Multiple Cases Found. Tap to Select Your Case:
               </label>
               <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-                {phcMatches.map((m) => {
+                {phcMatches.map((m, index) => {
                   const isSelected = selectedPhcMatchId === m.id;
                   return (
                     <div
-                      key={m.id}
+                      key={`match-${m.id}-${m.appealNo}-${m.year}-${index}`}
                       onClick={() => {
                         setSelectedPhcMatchId(m.id);
                         applyCaseDetails(m);
@@ -543,7 +567,26 @@ export const AddCaseModal: React.FC<AddCaseModalProps> = ({
                       <div className="font-semibold text-slate-800 mt-1 line-clamp-1">
                         {m.caseTitle}
                       </div>
-                      <div className="text-[10px] text-slate-500 mt-0.5 flex items-center justify-between">
+                      {(m.nextDate || m.causeListSrNo) && (
+                        <div className="mt-1.5 p-1.5 rounded-lg bg-emerald-50 border border-emerald-200 text-[10px] text-emerald-900 font-bold flex flex-wrap items-center gap-1.5">
+                          <span>Fixed: {m.nextDate}</span>
+                          <span>•</span>
+                          <span>{m.courtRoom || 'Court Room 1'}</span>
+                          {m.causeListSrNo && (
+                            <>
+                              <span>•</span>
+                              <span className="text-teal-800">Sr. #{m.causeListSrNo}</span>
+                            </>
+                          )}
+                          {m.justiceName && (
+                            <>
+                              <span>•</span>
+                              <span className="truncate max-w-[180px]">{m.justiceName}</span>
+                            </>
+                          )}
+                        </div>
+                      )}
+                      <div className="text-[10px] text-slate-500 mt-1 flex items-center justify-between">
                         <span>Bench: {m.bench}</span>
                         {m.advocateName && <span className="truncate max-w-[160px]">Adv: {m.advocateName}</span>}
                       </div>
@@ -638,17 +681,62 @@ export const AddCaseModal: React.FC<AddCaseModalProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                  Next Scheduled Hearing Date
-                </label>
-                <input
-                  type="date"
-                  value={nextDate}
-                  onChange={(e) => setNextDate(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-600"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                    Next Scheduled Hearing Date
+                  </label>
+                  <input
+                    type="date"
+                    value={nextDate}
+                    onChange={(e) => setNextDate(e.target.value)}
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                    Cause List Serial No. (Sr. #)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. 1, 14, 25"
+                    value={causeListSrNo}
+                    onChange={(e) => setCauseListSrNo(e.target.value)}
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  />
+                </div>
               </div>
+
+              {courtType === 'PHC' && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-blue-50/70 border border-blue-200 rounded-xl">
+                  <div>
+                    <label className="block text-[11px] font-bold text-blue-950 mb-1">
+                      Court Number (Court Room)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Court No. 1"
+                      value={courtRoom}
+                      onChange={(e) => setCourtRoom(e.target.value)}
+                      className="w-full px-3 py-2 bg-white border border-blue-300 rounded-lg text-xs font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-blue-950 mb-1">
+                      Name of Hon. Justice / Judges
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Mr. Justice S.M. Attique Shah, Chief Justice"
+                      value={justiceName}
+                      onChange={(e) => setJusticeName(e.target.value)}
+                      className="w-full px-3 py-2 bg-white border border-blue-300 rounded-lg text-xs font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

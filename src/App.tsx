@@ -6,7 +6,7 @@
 import React, { useState, useEffect, useCallback, useTransition } from 'react';
 import { UserProfile, CourtCase, HearingAlert } from './types';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
-import { sortCasesByHearingDate, generateCaseAlert, formatDisplayDate, calculateNotificationTriggerTime } from './utils/dateUtils';
+import { sortCasesByHearingDate, deduplicateCases, generateCaseAlert, formatDisplayDate, calculateNotificationTriggerTime } from './utils/dateUtils';
 import { playAlertChime } from './utils/soundUtils';
 import { WelcomeHeader } from './components/WelcomeHeader';
 import { PWAInstallBanner } from './components/PWAInstallBanner';
@@ -90,20 +90,23 @@ export default function App() {
 
   // Court Cases State (Loaded directly from offline storage, 100% accessible offline)
   const [cases, setCases] = useState<CourtCase[]>(() => {
+    let raw: CourtCase[] = [];
     const activeId = getActiveUserId();
     if (activeId) {
       const userCases = getUserCases(activeId);
-      if (userCases.length > 0) return userCases;
+      if (userCases.length > 0) raw = userCases;
     }
-    const savedCases = localStorage.getItem(STORAGE_KEYS.CASES);
-    if (savedCases) {
-      try {
-        return JSON.parse(savedCases);
-      } catch {
-        // fallback
+    if (raw.length === 0) {
+      const savedCases = localStorage.getItem(STORAGE_KEYS.CASES);
+      if (savedCases) {
+        try {
+          raw = JSON.parse(savedCases);
+        } catch {
+          // fallback
+        }
       }
     }
-    return [];
+    return deduplicateCases(raw);
   });
 
   // Last Updated Time
@@ -198,7 +201,8 @@ export default function App() {
   // Save cases changes with per-user isolated persistence
   const updateCasesState = useCallback(
     (newCases: CourtCase[]) => {
-      const sorted = sortCasesByHearingDate(newCases);
+      const deduped = deduplicateCases(newCases);
+      const sorted = sortCasesByHearingDate(deduped);
       setCases(sorted);
       localStorage.setItem(STORAGE_KEYS.CASES, JSON.stringify(sorted));
       const activeId = getActiveUserId() || (profile?.username ? normalizeUserId(profile.username) : null);
@@ -423,9 +427,13 @@ export default function App() {
    * It should be automatically every time the user opens/ launches the app when it is connected to the internet."
    */
   useEffect(() => {
-    // Auto sort on launch
+    // Auto sort on launch and eliminate any existing duplicate keys from storage
     startTransition(() => {
-      setCases((prev) => sortCasesByHearingDate(prev));
+      setCases((prev) => {
+        const cleaned = deduplicateCases(prev);
+        localStorage.setItem(STORAGE_KEYS.CASES, JSON.stringify(cleaned));
+        return sortCasesByHearingDate(cleaned);
+      });
     });
 
     if (isOnline && cases.length > 0) {
@@ -517,12 +525,17 @@ export default function App() {
       return;
     }
 
-    const updated = [newCase, ...cases];
+    let safeId = newCase.id;
+    if (cases.some((c) => c.id === safeId)) {
+      safeId = `${safeId}-${Date.now()}`;
+    }
+    const safeNewCase = { ...newCase, id: safeId };
+    const updated = [safeNewCase, ...cases];
     const sorted = sortCasesByHearingDate(updated);
     updateCasesState(sorted);
 
     if (currentUser) {
-      saveCloudCase(currentUser.username, newCase).catch((err) =>
+      saveCloudCase(currentUser.username, safeNewCase).catch((err) =>
         console.warn('Failed to save case to cloud:', err)
       );
     }
@@ -556,6 +569,83 @@ export default function App() {
     setTimeout(() => {
       setUpdateFeedbackBanner(null);
     }, 3500);
+  };
+
+  // Dedicated single-case refresh directly with Current_Causelist.html and court portals
+  const handleRefreshSingleCase = async (courtCase: CourtCase) => {
+    if (!isOnline) {
+      setUpdateFeedbackBanner({
+        type: 'error',
+        message: 'Not connected to internet to sync case with cause list.',
+      });
+      return;
+    }
+    const isPhc = courtCase.court === 'PHC' || courtCase.id.startsWith('phc-');
+    const numMatch = String(courtCase.appealNo).match(/\d+/);
+    const cleanNo = numMatch ? numMatch[0] : courtCase.appealNo;
+
+    try {
+      if (isPhc) {
+        const res = await fetch('/api/phc/refresh-case', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            caseNo: cleanNo,
+            year: courtCase.year,
+            bench: courtCase.causeListBench || courtCase.placeOfHearing,
+            appealNo: courtCase.appealNo,
+            id: courtCase.id,
+          }),
+        });
+        const data = await res.json();
+        if (data.success && data.caseData) {
+          handleUpdateCase({
+            ...courtCase,
+            ...data.caseData,
+            id: courtCase.id,
+            lastUpdated: new Date().toISOString(),
+          });
+          setUpdateFeedbackBanner({
+            type: 'success',
+            message: data.causeListFound
+              ? `Verified on Current Cause List! Fixed on ${formatDisplayDate(data.caseData.nextDate)} | ${data.caseData.courtRoom || 'Court Room 1'} | Hon. ${data.caseData.justiceName || 'Justice'} (Sr. #${data.caseData.causeListSrNo || '1'})`
+              : `Refreshed case #${cleanNo}/${courtCase.year} from Peshawar High Court portals.`,
+          });
+        } else {
+          setUpdateFeedbackBanner({
+            type: 'info',
+            message: data.error || `Case #${cleanNo}/${courtCase.year} not listed on current cause list.`,
+          });
+        }
+      } else {
+        const res = await fetch('/api/kpst/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            appealNo: cleanNo,
+            year: courtCase.year,
+            place: courtCase.placeOfHearing,
+          }),
+        });
+        const data = await res.json();
+        if (data.success && data.caseData) {
+          handleUpdateCase({
+            ...courtCase,
+            ...data.caseData,
+            lastUpdated: new Date().toISOString(),
+          });
+          setUpdateFeedbackBanner({
+            type: 'success',
+            message: `Updated Appeal #${cleanNo}/${courtCase.year} from KPST.`,
+          });
+        }
+      }
+    } catch {
+      setUpdateFeedbackBanner({
+        type: 'error',
+        message: `Unable to refresh case #${cleanNo}/${courtCase.year}. Court portal busy.`,
+      });
+    }
   };
 
   // Delete case handler without window.confirm (iframe safe)
@@ -789,6 +879,7 @@ export default function App() {
         cases={cases}
         onDeleteCase={handleDeleteCase}
         onUpdateCase={handleUpdateCase}
+        onRefreshCase={handleRefreshSingleCase}
         onFetchJudgments={(caseNo, year, benchId) => {
           setJudgmentsInitialCase({ caseNo, year, benchId });
           setIsJudgmentsOpen(true);

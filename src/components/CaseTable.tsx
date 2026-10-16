@@ -14,6 +14,7 @@ import {
   Scale,
   Landmark,
   AlertTriangle,
+  RefreshCw,
 } from 'lucide-react';
 import { formatDisplayDate, parseHearingDate, calculateNotificationTriggerTime } from '../utils/dateUtils';
 
@@ -29,6 +30,7 @@ export const CaseTable: React.FC<CaseTableProps> = ({
   cases,
   onDeleteCase,
   onUpdateCase,
+  onRefreshCase,
   onFetchJudgments,
 }) => {
   const [selectedCase, setSelectedCase] = useState<CourtCase | null>(null);
@@ -37,6 +39,18 @@ export const CaseTable: React.FC<CaseTableProps> = ({
   const [searchFilter, setSearchFilter] = useState('');
   const [activeTab, setActiveTab] = useState<'all' | 'upcoming' | 'decided'>('all');
   const [courtFilter, setCourtFilter] = useState<'all' | 'KPST' | 'PHC'>('all');
+  const [refreshingCaseId, setRefreshingCaseId] = useState<string | null>(null);
+
+  const handleRefreshClick = async (e: React.MouseEvent, c: CourtCase) => {
+    e.stopPropagation();
+    if (!onRefreshCase) return;
+    setRefreshingCaseId(c.id);
+    try {
+      await onRefreshCase(c);
+    } finally {
+      setRefreshingCaseId(null);
+    }
+  };
 
   const now = new Date();
   now.setHours(0, 0, 0, 0);
@@ -204,7 +218,7 @@ export const CaseTable: React.FC<CaseTableProps> = ({
 
               return (
                 <div
-                  key={c.id}
+                  key={`case-card-${c.id}-${c.court}-${c.appealNo}-${c.year}-${index}`}
                   onClick={() => setSelectedCase(c)}
                   className={`p-3.5 rounded-2xl border transition-all cursor-pointer shadow-xs ${
                     isDeleted
@@ -313,6 +327,17 @@ export const CaseTable: React.FC<CaseTableProps> = ({
                     onClick={(e) => e.stopPropagation()}
                   >
                     <div className="flex items-center gap-1.5">
+                      {onRefreshCase && (
+                        <button
+                          onClick={(e) => handleRefreshClick(e, c)}
+                          disabled={refreshingCaseId === c.id}
+                          title={isPhc ? 'Sync case with Current Cause List (peshawarhighcourt.gov.pk)' : 'Sync case with KPST'}
+                          className="py-1 px-2.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg font-bold text-[11px] transition flex items-center gap-1 disabled:opacity-50"
+                        >
+                          <RefreshCw className={`w-3 h-3 text-emerald-700 ${refreshingCaseId === c.id ? 'animate-spin' : ''}`} />
+                          <span>Sync</span>
+                        </button>
+                      )}
                       {onFetchJudgments && (
                         <button
                           onClick={() => {
@@ -384,7 +409,7 @@ export const CaseTable: React.FC<CaseTableProps> = ({
 
                   return (
                     <tr
-                      key={c.id}
+                      key={`case-row-${c.id}-${c.court}-${c.appealNo}-${c.year}-${index}`}
                       onClick={() => setSelectedCase(c)}
                       className={`transition-colors cursor-pointer group ${
                         isDeleted ? 'bg-rose-50/40 hover:bg-rose-100/50' : 'hover:bg-emerald-50/30'
@@ -512,6 +537,17 @@ export const CaseTable: React.FC<CaseTableProps> = ({
                       {/* Action buttons */}
                       <td className="py-3.5 px-3 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-center justify-end gap-1">
+                          {onRefreshCase && (
+                            <button
+                              onClick={(e) => handleRefreshClick(e, c)}
+                              disabled={refreshingCaseId === c.id}
+                              title={isPhc ? 'Sync case with Current Cause List (peshawarhighcourt.gov.pk)' : 'Sync case with KPST'}
+                              className="p-1.5 text-emerald-700 hover:text-emerald-900 hover:bg-emerald-50 rounded-lg transition flex items-center gap-1 text-[11px] font-semibold disabled:opacity-50"
+                            >
+                              <RefreshCw className={`w-3.5 h-3.5 text-emerald-700 ${refreshingCaseId === c.id ? 'animate-spin' : ''}`} />
+                              <span className="hidden xl:inline">Sync</span>
+                            </button>
+                          )}
                           {onFetchJudgments && (
                             <button
                               onClick={() => {
@@ -743,6 +779,65 @@ export const CaseTable: React.FC<CaseTableProps> = ({
                     </div>
                   )}
 
+                  {/* Peshawar High Court Live Cause List Verification Banner */}
+                  {(selectedCase.court === 'PHC' || selectedCase.id.startsWith('phc-')) && (
+                    <div className="p-3.5 bg-gradient-to-r from-blue-50 via-slate-50 to-indigo-50 rounded-xl border border-blue-200 shadow-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2 mb-2 pb-2 border-b border-blue-200/70">
+                        <div className="flex items-center gap-1.5">
+                          <Landmark className="w-4 h-4 text-blue-900 shrink-0" />
+                          <span className="font-extrabold text-xs text-blue-950">
+                            Peshawar High Court Cause List (Current_Causelist.html)
+                          </span>
+                        </div>
+                        {selectedCase.causeListPdfUrl && (
+                          <a
+                            href={selectedCase.causeListPdfUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-[11px] font-bold text-blue-800 hover:text-blue-950 flex items-center gap-1 bg-white px-2.5 py-1 rounded-lg border border-blue-300 shadow-xs transition"
+                          >
+                            <FileText className="w-3.5 h-3.5 text-blue-700" />
+                            <span>Official Cause List PDF</span>
+                          </a>
+                        )}
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                        <div className="bg-white p-2 rounded-lg border border-blue-100">
+                          <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block">
+                            Next Hearing Date
+                          </span>
+                          <span className="font-extrabold text-emerald-800 mt-0.5 block">
+                            {selectedCase.nextDate ? formatDisplayDate(selectedCase.nextDate) : 'Not fixed yet'}
+                          </span>
+                        </div>
+                        <div className="bg-white p-2 rounded-lg border border-blue-100">
+                          <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block">
+                            Court Number
+                          </span>
+                          <span className="font-extrabold text-slate-900 mt-0.5 block">
+                            {selectedCase.courtRoom || 'Court Room 1'}
+                          </span>
+                        </div>
+                        <div className="bg-white p-2 rounded-lg border border-blue-100">
+                          <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block">
+                            Cause List Serial
+                          </span>
+                          <span className="font-extrabold text-teal-800 mt-0.5 block">
+                            {selectedCase.causeListSrNo ? `Sr. #${selectedCase.causeListSrNo}` : 'Regular / Pending'}
+                          </span>
+                        </div>
+                        <div className="bg-white p-2 rounded-lg border border-blue-100">
+                          <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block">
+                            Hon. Justice(s)
+                          </span>
+                          <span className="font-bold text-slate-900 mt-0.5 block line-clamp-2" title={selectedCase.justiceName}>
+                            {selectedCase.justiceName || selectedCase.causeListBench || 'Hon. High Court Bench'}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-100">
                     <div className="text-[10px] text-emerald-700 font-semibold uppercase tracking-wider">
                       Case Title
@@ -893,6 +988,23 @@ export const CaseTable: React.FC<CaseTableProps> = ({
               ) : (
                 <>
                 <div className="flex flex-wrap items-center gap-2">
+                  {onRefreshCase && (
+                    <button
+                      onClick={async () => {
+                        setRefreshingCaseId(selectedCase.id);
+                        try {
+                          await onRefreshCase(selectedCase);
+                        } finally {
+                          setRefreshingCaseId(null);
+                        }
+                      }}
+                      disabled={refreshingCaseId === selectedCase.id}
+                      className="py-1.5 px-3 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow-xs disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${refreshingCaseId === selectedCase.id ? 'animate-spin' : ''}`} />
+                      <span>Sync with Cause List</span>
+                    </button>
+                  )}
                   {onFetchJudgments && (
                     <button
                       onClick={() => {

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Calendar, Search, Scale, RefreshCw, X, AlertCircle, Landmark, AlertTriangle, FileText, CheckCircle2 } from 'lucide-react';
 import { PLACES_OF_HEARING } from '../types';
 
@@ -122,6 +122,16 @@ export const CauseListExplorer: React.FC<CauseListExplorerProps> = ({ isOpen, on
       setIsLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (isOpen && isOnline) {
+      if (activeCourt === 'PHC' && !phcData) {
+        handleFetchPhc();
+      } else if (activeCourt === 'KPST' && !kpstData) {
+        handleFetchKpst();
+      }
+    }
+  }, [isOpen, activeCourt, isOnline]);
 
   const handleSearch = () => {
     if (activeCourt === 'PHC') {
@@ -353,6 +363,42 @@ export const CauseListExplorer: React.FC<CauseListExplorerProps> = ({ isOpen, on
           {/* PHC Results Table */}
           {activeCourt === 'PHC' && phcData && (
             <div className="space-y-4">
+              {/* Official Peshawar High Court Cause List Banner */}
+              <div className="p-3 bg-gradient-to-r from-blue-900 to-indigo-950 text-white rounded-xl shadow-xs flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Landmark className="w-4 h-4 text-amber-300 shrink-0" />
+                  <div>
+                    <div className="font-bold text-xs">
+                      Peshawar High Court — {phcData.bench} Daily Cause List
+                    </div>
+                    <div className="text-[10px] text-blue-200">
+                      Roster Date: <strong>{phcData.date}</strong> • Active Cases: <strong>{phcData.activeCasesCount}</strong> • Deleted: <strong>{phcData.deletedCasesCount}</strong>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <a
+                    href="https://www.peshawarhighcourt.gov.pk/app/site/18/p/Current_Causelist.html"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[10px] font-bold text-blue-200 hover:text-white underline"
+                  >
+                    Current_Causelist.html ↗
+                  </a>
+                  {phcData.pdfUrl && (
+                    <a
+                      href={phcData.pdfUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-2 py-1 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded-lg text-[10px] flex items-center gap-1 transition"
+                    >
+                      <FileText className="w-3 h-3" />
+                      <span>PDF</span>
+                    </a>
+                  )}
+                </div>
+              </div>
+
               {/* Roster Benches Banner */}
               {phcData.benches.length > 0 && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">

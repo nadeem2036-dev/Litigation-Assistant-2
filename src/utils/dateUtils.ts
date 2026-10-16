@@ -56,14 +56,60 @@ export function parseHearingDate(dateStr: string): Date | null {
 }
 
 /**
+ * Deduplicates an array of court cases, guaranteeing that:
+ * 1. Duplicate cases representing the exact same court + appeal + year are merged or skipped.
+ * 2. Every single case in the returned array has a strictly unique `id`, preventing React duplicate key errors.
+ */
+export function deduplicateCases(casesList: CourtCase[]): CourtCase[] {
+  if (!Array.isArray(casesList)) return [];
+
+  const seenIds = new Set<string>();
+  const seenCaseSignatures = new Set<string>();
+  const result: CourtCase[] = [];
+
+  for (let i = 0; i < casesList.length; i++) {
+    const c = casesList[i];
+    if (!c || typeof c !== 'object') continue;
+
+    const normCourt = String(c.court || 'KPST').toUpperCase();
+    const normAppeal = String(c.appealNo || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const normYear = String(c.year || '').trim();
+    const signature = `${normCourt}-${normAppeal}-${normYear}`;
+
+    // If exact same court, appeal, and year has already been added, skip duplicate
+    if (normAppeal && normYear && seenCaseSignatures.has(signature)) {
+      continue;
+    }
+    if (normAppeal && normYear) {
+      seenCaseSignatures.add(signature);
+    }
+
+    // Ensure id is completely unique
+    let id = String(c.id || '').trim();
+    if (!id || seenIds.has(id)) {
+      id = `${id || normCourt.toLowerCase()}-${normAppeal || i}-${normYear || Date.now()}-${i}`;
+    }
+    seenIds.add(id);
+
+    result.push({
+      ...c,
+      id,
+    });
+  }
+
+  return result;
+}
+
+/**
  * Sorts court cases so that the case with the earliest upcoming hearing date is first.
  * Cases without hearing date or already decided come after upcoming hearings.
  */
 export function sortCasesByHearingDate(cases: CourtCase[]): CourtCase[] {
+  const deduped = deduplicateCases(cases);
   const now = new Date();
   now.setHours(0, 0, 0, 0);
 
-  return [...cases].sort((a, b) => {
+  return [...deduped].sort((a, b) => {
     const dateA = parseHearingDate(a.nextDate);
     const dateB = parseHearingDate(b.nextDate);
 

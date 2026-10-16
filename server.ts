@@ -197,20 +197,54 @@ function formatPhcCaseType(codeDtl: string): { prefix: string; bench: string } {
   return { prefix: type, bench };
 }
 
-interface PhcCauseListPdf {
+export interface PhcCauseListPdf {
   bench: string;
   pdfUrl: string;
-  date: string;
+  date: string; // YYYY-MM-DD
+  rawDate: string; // e.g. 13-10-2026
 }
 
-// Scrape active published daily cause lists from www.peshawarhighcourt.gov.pk
+export interface ParsedPhcCauseListCase {
+  srNo: string;
+  caseType: string;
+  caseNo: string;
+  year: string;
+  fullCaseNo: string;
+  courtRoom: string; // e.g. "Court No. 1"
+  justiceName: string; // e.g. "MR. JUSTICE S.M. ATTIQUE SHAH, CHIEF JUSTICE"
+  nextDate: string; // YYYY-MM-DD
+  causeListBench: string;
+  causeListPdfUrl: string;
+  title: string;
+  isOnDeletedList?: boolean;
+}
+
+interface CachedCauseList {
+  timestamp: number;
+  pdfUrl: string;
+  bench: string;
+  date: string;
+  cases: ParsedPhcCauseListCase[];
+  caseMap: Map<string, ParsedPhcCauseListCase>;
+  rosterBenches: Array<{
+    bench: string;
+    justiceName: string;
+    courtRoom: string;
+    isDivisionBench: boolean;
+  }>;
+}
+
+const phcCauseListCache = new Map<string, CachedCauseList>();
+const CAUSE_LIST_CACHE_TTL = 20 * 60 * 1000; // 20 minutes
+
+// Scrape active published daily cause lists from https://www.peshawarhighcourt.gov.pk/app/site/18/p/Current_Causelist.html
 async function getPhcPublishedCauseLists(): Promise<PhcCauseListPdf[]> {
   try {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 6000);
+    const t = setTimeout(() => ctrl.abort(), 8000);
     const res = await fetch('https://www.peshawarhighcourt.gov.pk/app/site/18/p/Current_Causelist.html', {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       },
       signal: ctrl.signal,
     });
@@ -221,10 +255,22 @@ async function getPhcPublishedCauseLists(): Promise<PhcCauseListPdf[]> {
     const regex = /<tr>\s*<td>\s*<strong>([^<]+)<\/strong>\s*<\/td>\s*<td>\s*<a href="([^"]+)"[^>]*>[\s\S]*?<\/a>\s*<\/td>\s*<td>\s*\[([^\]]+)\]/gi;
     let m;
     while ((m = regex.exec(html)) !== null) {
+      const bench = m[1].trim();
+      let pdfUrl = m[2].trim();
+      if (!pdfUrl.startsWith('http')) {
+        pdfUrl = `https://www.peshawarhighcourt.gov.pk/${pdfUrl.replace(/^\//, '')}`;
+      }
+      const rawDate = m[3].trim();
+      let dateYMD = rawDate;
+      const parts = rawDate.split('-');
+      if (parts.length === 3) {
+        dateYMD = `${parts[2]}-${parts[1]}-${parts[0]}`;
+      }
       rows.push({
-        bench: m[1].trim(),
-        pdfUrl: m[2].trim(),
-        date: m[3].trim(),
+        bench,
+        pdfUrl,
+        date: dateYMD,
+        rawDate,
       });
     }
     return rows;
@@ -234,13 +280,343 @@ async function getPhcPublishedCauseLists(): Promise<PhcCauseListPdf[]> {
   }
 }
 
+// Fetch PDF buffer with retry and validation
+async function fetchPdfBufferWithRetry(url: string, maxAttempts = 3): Promise<Uint8Array | null> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 15000);
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': '*/*',
+        },
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const ab = await res.arrayBuffer();
+      if (ab.byteLength < 5000) throw new Error(`Incomplete PDF buffer size: ${ab.byteLength}`);
+      return new Uint8Array(ab);
+    } catch (err) {
+      if (attempt === maxAttempts) {
+        console.warn(`Failed to fetch PDF ${url} after ${maxAttempts} attempts:`, err);
+        return null;
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  return null;
+}
+
+// Download and parse cause list PDF from Peshawar High Court
+async function getOrParsePhcCauseList(
+  pdfUrl: string,
+  benchName: string,
+  fallbackDateYMD: string
+): Promise<CachedCauseList | null> {
+  const cached = phcCauseListCache.get(pdfUrl);
+  if (cached && Date.now() - cached.timestamp < CAUSE_LIST_CACHE_TTL) {
+    return cached;
+  }
+
+  const pdfData = await fetchPdfBufferWithRetry(pdfUrl);
+  if (!pdfData) return null;
+
+  try {
+    // Clone buffer copy to prevent detached ArrayBuffer errors
+    const dataCopy = new Uint8Array(pdfData.slice(0));
+    const parser = new PDFParse({ data: dataCopy });
+    const textResult = await parser.getText();
+    const fullText = textResult.text;
+
+    // Detect exact cause list date from PDF header e.g. DAILY LIST FOR TUE, 13 OCTOBER, 2026 or 16 OCTOBER, 2026
+    let dateYMD = fallbackDateYMD;
+    const dateMatch = fullText.match(/DAILY LIST FOR [A-Z]+,\s*(\d{1,2})\s+([A-Z]+),\s*(\d{4})/i);
+    if (dateMatch) {
+      const day = dateMatch[1].padStart(2, '0');
+      const monthNames: Record<string, string> = {
+        JANUARY: '01', FEBRUARY: '02', MARCH: '03', APRIL: '04', MAY: '05', JUNE: '06',
+        JULY: '07', AUGUST: '08', SEPTEMBER: '09', OCTOBER: '10', NOVEMBER: '11', DECEMBER: '12'
+      };
+      const month = monthNames[dateMatch[2].toUpperCase()] || '10';
+      const year = dateMatch[3];
+      dateYMD = `${year}-${month}-${day}`;
+    }
+
+    const caseMap = new Map<string, ParsedPhcCauseListCase>();
+    const cases: ParsedPhcCauseListCase[] = [];
+    const rosterBenchesMap = new Map<string, { bench: string; justiceName: string; courtRoom: string; isDivisionBench: boolean }>();
+
+    const pages = fullText.split(/__\s*\d+\s*__/);
+    let currentCourt = 'Court No. 1';
+    let currentJustice = 'Hon. Chief Justice / Senior Judge';
+    let isDeletedSection = false;
+
+    for (let pIdx = 1; pIdx < pages.length; pIdx++) {
+      const page = pages[pIdx];
+
+      const courtMatch = page.match(/Court No:\s*(\d+)/i);
+      if (courtMatch) {
+        currentCourt = `Court No. ${courtMatch[1]}`;
+      }
+
+      if (/DELETED\s+CASES/i.test(page)) {
+        isDeletedSection = true;
+      } else if (courtMatch && !/DELETED/i.test(page.slice(0, 300))) {
+        isDeletedSection = false;
+      }
+
+      // Extract Justice / Judge names following BEFORE:- up to category headers
+      const beforeSection = page.match(/BEFORE:-\s*([\s\S]{1,380}?)(?=(?:MOTION|NOTICE|PRE-ADMISSION|OTHER|FINAL|DAILY|Page|\d+\s+[A-Za-z]))/i) ||
+                            page.match(/BEFORE:-\s*([\s\S]{1,350})/i);
+      if (beforeSection) {
+        const jLines = beforeSection[1]
+          .split('\n')
+          .map((l) => l.trim().replace(/^BEFORE:-\s*/i, ''))
+          .filter((l) => /JUSTICE|JUDGE/i.test(l) && !/CHIEF\s+JUSTICE'S\s+COURT/i.test(l));
+        if (jLines.length > 0) {
+          currentJustice = jLines.join(' & ');
+        }
+      }
+
+      const benchKey = `${currentCourt}-${currentJustice}`;
+      if (!rosterBenchesMap.has(benchKey)) {
+        rosterBenchesMap.set(benchKey, {
+          bench: currentCourt,
+          courtRoom: currentCourt,
+          justiceName: currentJustice,
+          isDivisionBench: currentJustice.includes('&'),
+        });
+      }
+
+      // Regex matching cases: srNo [whitespace] caseType [whitespace] caseNo/year
+      // e.g. 1 \t Cr.M(BA) 3096/2026 or 11 \t W.P 3806/2025
+      const caseRegex = /(\d{1,4})\s+([A-Za-z.()/-]+)\s+(\d+)\/(\d{2,4})/g;
+      let m;
+      while ((m = caseRegex.exec(page)) !== null) {
+        const srNo = m[1];
+        const caseType = m[2].trim();
+        const caseNo = m[3].trim();
+        const rawYear = m[4].trim();
+        const year = rawYear.length === 2 ? `20${rawYear}` : rawYear;
+        const fullCaseNo = `${caseType} ${caseNo}/${year}`;
+
+        const idx = m.index;
+        const contextBefore = page.substring(Math.max(0, idx - 450), idx);
+        const vsMatch = contextBefore.match(/([^\n\r_]+?)\s*(?:V\/S|VS|VERSUS)\s*([^\n\r_]+)/i);
+        let title = '';
+        if (vsMatch) {
+          title = `${vsMatch[1].trim()} V/S ${vsMatch[2].trim()}`.replace(/\s+/g, ' ');
+        }
+
+        const caseItem: ParsedPhcCauseListCase = {
+          srNo,
+          caseType,
+          caseNo,
+          year,
+          fullCaseNo,
+          courtRoom: currentCourt,
+          justiceName: currentJustice,
+          nextDate: dateYMD,
+          causeListBench: benchName,
+          causeListPdfUrl: pdfUrl,
+          title: title || `${caseType} ${caseNo}/${year}`,
+          isOnDeletedList: isDeletedSection,
+        };
+
+        cases.push(caseItem);
+
+        // Index in map with multiple access keys
+        const numKey = `${caseNo}/${year}`;
+        caseMap.set(numKey, caseItem);
+        caseMap.set(`${caseNo}/${year.slice(-2)}`, caseItem);
+        const normPrefix = caseType.toLowerCase().replace(/[^a-z0-9]/g, '');
+        caseMap.set(`${normPrefix}${caseNo}/${year}`, caseItem);
+        caseMap.set(`${normPrefix} ${caseNo}/${year}`, caseItem);
+        caseMap.set(`${caseType.toLowerCase()} ${caseNo}/${year}`, caseItem);
+        caseMap.set(fullCaseNo.toLowerCase(), caseItem);
+      }
+    }
+
+    const cachedData: CachedCauseList = {
+      timestamp: Date.now(),
+      pdfUrl,
+      bench: benchName,
+      date: dateYMD,
+      cases,
+      caseMap,
+      rosterBenches: Array.from(rosterBenchesMap.values()),
+    };
+
+    phcCauseListCache.set(pdfUrl, cachedData);
+    return cachedData;
+  } catch (err) {
+    console.warn(`Error parsing cause list PDF ${pdfUrl}:`, err);
+    return null;
+  }
+}
+
+// Background warmer for cause lists from https://www.peshawarhighcourt.gov.pk/app/site/18/p/Current_Causelist.html
+async function warmPhcCauseListsCache() {
+  try {
+    const publishedLists = await getPhcPublishedCauseLists();
+    if (publishedLists.length === 0) return;
+    // Download and parse up to 6 published lists in parallel in background
+    await Promise.allSettled(
+      publishedLists.slice(0, 6).map((l) => getOrParsePhcCauseList(l.pdfUrl, l.bench, l.date))
+    );
+  } catch (err) {
+    console.warn('Background warming of PHC cause lists:', err);
+  }
+}
+
+// Search across all current cause lists published on https://www.peshawarhighcourt.gov.pk/app/site/18/p/Current_Causelist.html
+async function findPhcCaseInPublishedCauseLists(
+  caseNo: string,
+  caseYear: string,
+  preferredBench?: string,
+  preferredType?: string
+): Promise<ParsedPhcCauseListCase | null> {
+  const numMatch = caseNo.match(/\d+/);
+  const cleanNo = numMatch ? numMatch[0] : caseNo.trim().replace(/^[^0-9]+/, '');
+  const cleanYr = caseYear.trim();
+  const searchKey = `${cleanNo}/${cleanYr}`;
+  const searchKey2Digit = `${cleanNo}/${cleanYr.slice(-2)}`;
+  const cleanPrefType = preferredType ? preferredType.toLowerCase().replace(/[^a-z]/g, '') : '';
+
+  try {
+    const publishedLists = await getPhcPublishedCauseLists();
+    if (publishedLists.length === 0) return null;
+
+    // Prioritize preferred bench (e.g. Principal Seat / Peshawar first) and upcoming dates
+    const pref = (preferredBench || 'PHC').toLowerCase();
+    const sortedLists = [...publishedLists].sort((a, b) => {
+      const aPref = a.bench.toLowerCase().includes(pref) || (pref.includes('peshawar') && a.bench.toLowerCase().includes('phc'));
+      const bPref = b.bench.toLowerCase().includes(pref) || (pref.includes('peshawar') && b.bench.toLowerCase().includes('phc'));
+      if (aPref !== bPref) return aPref ? -1 : 1;
+      return new Date(b.date).getTime() - new Date(a.date).getTime();
+    });
+
+    // 1. Fast check: examine in-memory cached cause lists first
+    for (const list of sortedLists) {
+      const cached = phcCauseListCache.get(list.pdfUrl);
+      if (cached && Date.now() - cached.timestamp < CAUSE_LIST_CACHE_TTL) {
+        if (cleanPrefType) {
+          const typeMatch = cached.cases.find(
+            (c) => c.caseNo === cleanNo && c.caseType.toLowerCase().replace(/[^a-z]/g, '') === cleanPrefType
+          );
+          if (typeMatch) return typeMatch;
+        }
+        if (cached.caseMap.has(searchKey)) return cached.caseMap.get(searchKey)!;
+        if (cached.caseMap.has(searchKey2Digit)) return cached.caseMap.get(searchKey2Digit)!;
+        const found = cached.cases.find(
+          (c) => c.caseNo === cleanNo && (c.year === cleanYr || c.year.slice(-2) === cleanYr.slice(-2))
+        );
+        if (found) return found;
+      }
+    }
+
+    // 2. Parallel fetch & parse for uncached lists
+    const parsePromises = sortedLists.map((list) => getOrParsePhcCauseList(list.pdfUrl, list.bench, list.date));
+    const parsedResults = await Promise.allSettled(parsePromises);
+
+    // First pass: try exact case type match if preferredType was specified
+    if (cleanPrefType) {
+      for (const res of parsedResults) {
+        if (res.status === 'fulfilled' && res.value) {
+          const typeMatch = res.value.cases.find(
+            (c) => c.caseNo === cleanNo && c.caseType.toLowerCase().replace(/[^a-z]/g, '') === cleanPrefType
+          );
+          if (typeMatch) return typeMatch;
+        }
+      }
+    }
+
+    // Second pass: general case number / year match
+    for (const res of parsedResults) {
+      if (res.status === 'fulfilled' && res.value) {
+        const parsed = res.value;
+        if (parsed.caseMap.has(searchKey)) return parsed.caseMap.get(searchKey)!;
+        if (parsed.caseMap.has(searchKey2Digit)) return parsed.caseMap.get(searchKey2Digit)!;
+        const found = parsed.cases.find(
+          (c) => c.caseNo === cleanNo && (c.year === cleanYr || c.year.slice(-2) === cleanYr.slice(-2))
+        );
+        if (found) return found;
+      }
+    }
+  } catch (err) {
+    console.warn('Error querying published cause lists:', err);
+  }
+  return null;
+}
+
+// Find all occurrences of a case number across all active published cause lists
+async function findAllPhcCasesInPublishedCauseLists(
+  caseNo: string,
+  caseYear: string,
+  preferredBench?: string
+): Promise<ParsedPhcCauseListCase[]> {
+  const numMatch = caseNo.match(/\d+/);
+  const cleanNo = numMatch ? numMatch[0] : caseNo.trim().replace(/^[^0-9]+/, '');
+  const yrMatch = caseYear.match(/\d{4}/) || caseYear.match(/\d{2}/);
+  const cleanYr = yrMatch ? yrMatch[0] : caseYear.trim();
+
+  const results: ParsedPhcCauseListCase[] = [];
+  try {
+    const publishedLists = await getPhcPublishedCauseLists();
+    if (publishedLists.length === 0) return [];
+
+    const pref = (preferredBench || 'PHC').toLowerCase();
+    const sortedLists = [...publishedLists].sort((a, b) => {
+      const aPref = a.bench.toLowerCase().includes(pref) || (pref.includes('peshawar') && a.bench.toLowerCase().includes('phc'));
+      const bPref = b.bench.toLowerCase().includes(pref) || (pref.includes('peshawar') && b.bench.toLowerCase().includes('phc'));
+      if (aPref !== bPref) return aPref ? -1 : 1;
+      return new Date(b.date).getTime() - new Date(a.date).getTime();
+    });
+
+    const uncachedLists: PhcCauseListPdf[] = [];
+    for (const list of sortedLists) {
+      const cached = phcCauseListCache.get(list.pdfUrl);
+      if (cached && Date.now() - cached.timestamp < CAUSE_LIST_CACHE_TTL) {
+        for (const c of cached.cases) {
+          if (c.caseNo === cleanNo && (c.year === cleanYr || c.year.slice(-2) === cleanYr.slice(-2))) {
+            results.push(c);
+          }
+        }
+      } else {
+        uncachedLists.push(list);
+      }
+    }
+
+    if (uncachedLists.length > 0) {
+      const parsePromises = uncachedLists.map((list) => getOrParsePhcCauseList(list.pdfUrl, list.bench, list.date));
+      const parsedResults = await Promise.allSettled(parsePromises);
+      for (const res of parsedResults) {
+        if (res.status === 'fulfilled' && res.value) {
+          for (const c of res.value.cases) {
+            if (c.caseNo === cleanNo && (c.year === cleanYr || c.year.slice(-2) === cleanYr.slice(-2))) {
+              results.push(c);
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Error querying all published cause lists:', err);
+  }
+  return results;
+}
+
 // Scrape / query search result from Peshawar High Court across:
 // 1. https://phccfmis.peshawarhighcourt.gov.pk (CFMIS API)
 // 2. https://diary.peshawarhighcourt.gov.pk (Diary API)
 // 3. https://www.peshawarhighcourt.gov.pk (Cause Lists & Rosters)
 async function searchPhcCases(caseNo: string, caseYear: string, preferredBenchId: number = 1): Promise<CaseRecord[]> {
-  const cleanNo = caseNo.trim();
-  const cleanYr = caseYear.trim();
+  const numMatch = caseNo.match(/\d+/);
+  const cleanNo = numMatch ? numMatch[0] : caseNo.trim().replace(/^[^0-9]+/, '');
+  const yrMatch = caseYear.match(/\d{4}/) || caseYear.match(/\d{2}/);
+  const cleanYr = yrMatch ? yrMatch[0] : caseYear.trim();
   const resultsMap = new Map<string, CaseRecord>();
 
   // Fetch published cause lists from www.peshawarhighcourt.gov.pk concurrently
@@ -476,16 +852,77 @@ async function searchPhcCases(caseNo: string, caseYear: string, preferredBenchId
   // Wait for both CFMIS circuit benches and Diary results
   await Promise.allSettled([cfmisSearchPromise, diarySearchPromise]);
 
-  // 3. Cross-reference published cause lists from www.peshawarhighcourt.gov.pk
+  // 3. Search and cross-reference published cause lists from https://www.peshawarhighcourt.gov.pk/app/site/18/p/Current_Causelist.html
   try {
-    const publishedLists = await publishedCauseListsPromise;
-    if (publishedLists.length > 0) {
-      for (const record of resultsMap.values()) {
-        if (record.nextDate) {
-          const parts = record.nextDate.split('-');
-          if (parts.length === 3) {
-            const formattedNext = `${parts[2]}-${parts[1]}-${parts[0]}`; // DD-MM-YYYY
-            const matchedList = publishedLists.find((p) => p.date === formattedNext);
+    const prefBenchName = preferredBenchId === 3 ? 'Abbottabad' : preferredBenchId === 2 ? 'D.I.Khan' : preferredBenchId === 4 ? 'Mingora' : preferredBenchId === 5 ? 'Bannu' : 'PHC';
+    const causeListMatches = await findAllPhcCasesInPublishedCauseLists(cleanNo, cleanYr, prefBenchName);
+    if (causeListMatches.length > 0) {
+      for (const causeListMatch of causeListMatches) {
+        const allRecords = Array.from(resultsMap.values());
+        const normCauseType = causeListMatch.caseType.toLowerCase().replace(/[^a-z]/g, '');
+
+        let targetRecord = allRecords.find((r) => {
+          const normAppeal = r.appealNo.toLowerCase().replace(/[^a-z]/g, '');
+          const normNature = (r.natureOfCase || '').toLowerCase().replace(/[^a-z]/g, '');
+          return normAppeal.includes(normCauseType) || normNature.includes(normCauseType);
+        });
+
+        if (targetRecord) {
+          // Overlay verified live cause list data onto matched case
+          targetRecord.nextDate = causeListMatch.nextDate; // Verified fixed date from cause list!
+          targetRecord.justiceName = causeListMatch.justiceName; // Name of Justice
+          targetRecord.courtRoom = causeListMatch.courtRoom; // Court Number (e.g. Court No. 1)
+          targetRecord.causeListSrNo = causeListMatch.srNo; // Serial number on cause list
+          targetRecord.causeListBench = causeListMatch.causeListBench;
+          targetRecord.causeListPdfUrl = causeListMatch.causeListPdfUrl;
+          if (causeListMatch.isOnDeletedList) {
+            targetRecord.isOnDeletedList = true;
+          }
+          if (!targetRecord.caseTitle || targetRecord.caseTitle.startsWith('PHC CASE')) {
+            targetRecord.caseTitle = causeListMatch.title || targetRecord.caseTitle;
+          }
+        } else {
+          // Add verified cause list entry directly into resultsMap so the user can select it
+          const key = `phc-${causeListMatch.caseType.replace(/[^a-z0-9]/gi, '')}-${causeListMatch.caseNo}-${causeListMatch.year}`;
+          resultsMap.set(key, {
+            id: key,
+            court: 'PHC',
+            appealNo: causeListMatch.fullCaseNo,
+            year: causeListMatch.year,
+            caseTitle: causeListMatch.title || `${causeListMatch.fullCaseNo}`,
+            department: 'Respondent Department / State',
+            bench: causeListMatch.justiceName.includes('&') ? 'Division Bench (DB)' : 'Single Bench (SB)',
+            justiceName: causeListMatch.justiceName,
+            courtRoom: causeListMatch.courtRoom,
+            isOnDeletedList: !!causeListMatch.isOnDeletedList,
+            advocateName: '',
+            natureOfCase: causeListMatch.caseType,
+            decision: 'Under Hearing',
+            decidedOn: '',
+            nextDate: causeListMatch.nextDate,
+            causeListSrNo: causeListMatch.srNo,
+            causeListBench: causeListMatch.causeListBench,
+            causeListPdfUrl: causeListMatch.causeListPdfUrl,
+            placeOfHearing: causeListMatch.causeListBench.toLowerCase().includes('abbott')
+              ? 'Abbottabad'
+              : causeListMatch.causeListBench.toLowerCase().includes('khan')
+              ? 'D.I Khan'
+              : causeListMatch.causeListBench.toLowerCase().includes('mingora') || causeListMatch.causeListBench.toLowerCase().includes('swat')
+              ? 'Swat'
+              : 'Peshawar',
+            lastUpdated: new Date().toISOString(),
+            notes: `Verified from Peshawar High Court Current Cause List (${causeListMatch.causeListBench}) on ${causeListMatch.nextDate}`,
+            benchId: preferredBenchId || 1,
+          });
+        }
+      }
+    } else {
+      // Fallback: match cause list PDF URL if nextDate was found from CFMIS/Diary
+      const publishedLists = await publishedCauseListsPromise;
+      if (publishedLists.length > 0) {
+        for (const record of resultsMap.values()) {
+          if (record.nextDate) {
+            const matchedList = publishedLists.find((p) => p.date === record.nextDate);
             if (matchedList) {
               record.causeListPdfUrl = matchedList.pdfUrl;
               if (!record.causeListBench) record.causeListBench = matchedList.bench;
@@ -494,8 +931,8 @@ async function searchPhcCases(caseNo: string, caseYear: string, preferredBenchId
         }
       }
     }
-  } catch {
-    // non-fatal
+  } catch (err) {
+    console.warn('Error cross-referencing cause list:', err);
   }
 
   return Array.from(resultsMap.values());
@@ -850,10 +1287,21 @@ app.post('/api/phc/search', async (req: Request, res: Response) => {
       return;
     }
 
+    // Ensure all returned cases have strictly unique IDs
+    const seenIds = new Set<string>();
+    const uniqueCases = cases.map((c, i) => {
+      let uniqueId = c.id;
+      if (seenIds.has(uniqueId)) {
+        uniqueId = `${uniqueId}-${i}`;
+      }
+      seenIds.add(uniqueId);
+      return { ...c, id: uniqueId };
+    });
+
     res.json({
       success: true,
-      count: cases.length,
-      cases,
+      count: uniqueCases.length,
+      cases: uniqueCases,
       source: 'Peshawar High Court (www.peshawarhighcourt.gov.pk, phccfmis.peshawarhighcourt.gov.pk, diary.peshawarhighcourt.gov.pk)',
     });
   } catch (error: unknown) {
@@ -958,196 +1406,66 @@ app.get('/api/phc/causelist', async (req: Request, res: Response) => {
     // Match bench
     const matchedList = publishedLists.find(
       (p) =>
-        (p.date === formattedDate || p.date.includes(formattedDate)) &&
+        (p.date === dateStr || p.rawDate === formattedDate || p.rawDate.includes(formattedDate)) &&
         (p.bench.toLowerCase().includes(benchName.toLowerCase()) || benchName.toLowerCase().includes(p.bench.toLowerCase()))
-    );
+    ) || publishedLists.find(
+      (p) => p.bench.toLowerCase().includes(benchName.toLowerCase()) || benchName.toLowerCase().includes(p.bench.toLowerCase())
+    ) || publishedLists[0];
 
-    // Circuit bench mapping
-    const bId = benchName.toLowerCase().includes('abbott')
-      ? 3
-      : benchName.toLowerCase().includes('khan')
-      ? 2
-      : benchName.toLowerCase().includes('swat') || benchName.toLowerCase().includes('mingora')
-      ? 4
-      : benchName.toLowerCase().includes('bannu')
-      ? 5
-      : 1;
-
-    // Standard High Court Judicial Roster for Peshawar High Court
-    const rosterBenches = [
-      {
-        bench: 'Division Bench-I (DB-I)',
-        justiceName: 'Hon. Mr. Justice Ishtiaq Ibrahim (Chief Justice) & Hon. Mr. Justice Wiqar Ahmad',
-        courtRoom: 'Court Room No. 1',
-        isDivisionBench: true,
-      },
-      {
-        bench: 'Division Bench-II (DB-II)',
-        justiceName: 'Hon. Mr. Justice Ijaz Anwar & Hon. Mr. Justice Syed Arshad Ali',
-        courtRoom: 'Court Room No. 2',
-        isDivisionBench: true,
-      },
-      {
-        bench: 'Single Bench-I (SB-I)',
-        justiceName: 'Hon. Mr. Justice S.M. Attique Shah',
-        courtRoom: 'Court Room No. 3',
-        isDivisionBench: false,
-      },
-      {
-        bench: 'Single Bench-II (SB-II)',
-        justiceName: 'Hon. Mr. Justice Shakeel Ahmad',
-        courtRoom: 'Court Room No. 4',
-        isDivisionBench: false,
-      },
-      {
-        bench: 'Single Bench-III (SB-III)',
-        justiceName: 'Hon. Mr. Justice Sahibzada Asadullah',
-        courtRoom: 'Court Room No. 5',
-        isDivisionBench: false,
-      },
-    ];
-
-    // Try fetching active daily cases for this bench from PHC backend if accessible
-    let sampleCases: Array<{
-      srNo: string;
-      caseNo: string;
-      caseTitle: string;
-      justiceName: string;
-      courtRoom: string;
-      bench: string;
-      nature: string;
-      isOnDeletedList: boolean;
-      deletedReason?: string;
-    }> = [];
-
-    // Check if we can search sample active cases for this date
-    try {
-      const searchCtrl = new AbortController();
-      const sTimer = setTimeout(() => searchCtrl.abort(), 3500);
-      const searchRes = await fetch(
-        `https://phccfmisbackend.peshawarhighcourt.gov.pk/api/phccfmis/dashboard/public/casesearch?bench=${bId}&caseNo=1&caseYear=2024`,
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)',
-          },
-          signal: searchCtrl.signal,
-        }
-      );
-      clearTimeout(sTimer);
-      if (searchRes.ok) {
-        const sData = await searchRes.json();
-        const list = sData.case_details || [];
-        if (Array.isArray(list) && list.length > 0) {
-          sampleCases = list.slice(0, 15).map((item: any, idx: number) => {
-            const roster = rosterBenches[idx % rosterBenches.length];
-            const isDel = idx % 5 === 4 || !!(item.DISPOSAL_INFO && item.DISPOSAL_INFO.toLowerCase().includes('deleted'));
-            const judgeNames = [item.JUDGENAME1, item.JUDGENAME2, item.JUDGENAME3].filter(Boolean).map(cleanText).join(' & ');
-            return {
-              srNo: String(idx + 1),
-              caseNo: item.CASE_NO || `W.P ${item.CASENO || idx + 1}/${item.CASEYEAR || '2024'}`,
-              caseTitle: item.TITLE ? cleanText(item.TITLE) : 'Karim Ullah VS State',
-              justiceName: judgeNames || roster.justiceName,
-              courtRoom: item.COURTROOM || roster.courtRoom,
-              bench: item.BENCH === 'D' ? 'Division Bench' : roster.bench,
-              nature: item.CASENAME || item.CATEGORY || 'Constitutional / Writ Petition',
-              isOnDeletedList: isDel,
-              deletedReason: isDel ? 'Case adjourned / deleted by order of the Hon. Bench' : undefined,
-            };
-          });
-        }
-      }
-    } catch {
-      // non-fatal
+    if (!matchedList) {
+      res.json({
+        success: true,
+        date: dateStr,
+        bench: benchName,
+        pdfUrl: null,
+        benches: [],
+        cases: [],
+        deletedCasesCount: 0,
+        activeCasesCount: 0,
+        source: 'Peshawar High Court (https://www.peshawarhighcourt.gov.pk)',
+      });
+      return;
     }
 
-    // If no dynamic cases fetched, construct structured roster with active and deleted cases
-    if (sampleCases.length === 0) {
-      sampleCases = [
-        {
-          srNo: '1',
-          caseNo: 'W.P 402-P/2024',
-          caseTitle: 'Malik Tariq Khan VS Govt of Khyber Pakhtunkhwa',
-          justiceName: rosterBenches[0].justiceName,
-          courtRoom: rosterBenches[0].courtRoom,
-          bench: rosterBenches[0].bench,
-          nature: 'Service / Seniority & Promotion',
-          isOnDeletedList: false,
-        },
-        {
-          srNo: '2',
-          caseNo: 'Cr.A 188-P/2023',
-          caseTitle: 'Zia Ullah VS The State',
-          justiceName: rosterBenches[0].justiceName,
-          courtRoom: rosterBenches[0].courtRoom,
-          bench: rosterBenches[0].bench,
-          nature: 'Criminal Appeal / Bail',
-          isOnDeletedList: false,
-        },
-        {
-          srNo: '3',
-          caseNo: 'W.P 1109-P/2024',
-          caseTitle: 'Dr. Farooq Ahmad VS Khyber Medical University',
-          justiceName: rosterBenches[1].justiceName,
-          courtRoom: rosterBenches[1].courtRoom,
-          bench: rosterBenches[1].bench,
-          nature: 'Writ Petition / Employment',
-          isOnDeletedList: false,
-        },
-        {
-          srNo: '4',
-          caseNo: 'C.R 55-P/2022',
-          caseTitle: 'Haji Noor Muhammad VS Mst. Zarina & Others',
-          justiceName: rosterBenches[2].justiceName,
-          courtRoom: rosterBenches[2].courtRoom,
-          bench: rosterBenches[2].bench,
-          nature: 'Civil Revision / Land Revenue',
-          isOnDeletedList: false,
-        },
-        {
-          srNo: '5',
-          caseNo: 'W.P 890-P/2023',
-          caseTitle: 'Mst. Ayesha Bibi VS Govt of KP',
-          justiceName: rosterBenches[0].justiceName,
-          courtRoom: rosterBenches[0].courtRoom,
-          bench: rosterBenches[0].bench,
-          nature: 'Service Matter / Upgradation',
-          isOnDeletedList: true,
-          deletedReason: 'Case deleted from Cause List due to reconstituted DB roster',
-        },
-        {
-          srNo: '6',
-          caseNo: 'B.A 341-P/2024',
-          caseTitle: 'Gulzar Khan VS The State',
-          justiceName: rosterBenches[3].justiceName,
-          courtRoom: rosterBenches[3].courtRoom,
-          bench: rosterBenches[3].bench,
-          nature: 'Post-Arrest Bail',
-          isOnDeletedList: false,
-        },
-        {
-          srNo: '7',
-          caseNo: 'W.P 2201-P/2023',
-          caseTitle: 'Muhammad Bilal VS Elementary & Secondary Education',
-          justiceName: rosterBenches[1].justiceName,
-          courtRoom: rosterBenches[1].courtRoom,
-          bench: rosterBenches[1].bench,
-          nature: 'Service Matter / Recruitment',
-          isOnDeletedList: true,
-          deletedReason: 'Case placed on DELETED LIST — Bench adjourned early',
-        },
-      ];
+    const parsed = await getOrParsePhcCauseList(matchedList.pdfUrl, matchedList.bench, matchedList.date);
+
+    if (parsed && parsed.cases.length > 0) {
+      const activeCases = parsed.cases.filter((c) => !c.isOnDeletedList);
+      const deletedCases = parsed.cases.filter((c) => c.isOnDeletedList);
+
+      res.json({
+        success: true,
+        date: parsed.date,
+        bench: parsed.bench,
+        pdfUrl: matchedList.pdfUrl,
+        benches: parsed.rosterBenches,
+        cases: parsed.cases.map((c) => ({
+          srNo: c.srNo,
+          caseNo: c.fullCaseNo,
+          caseTitle: c.title,
+          justiceName: c.justiceName,
+          courtRoom: c.courtRoom,
+          bench: c.causeListBench,
+          nature: c.caseType,
+          isOnDeletedList: !!c.isOnDeletedList,
+          deletedReason: c.isOnDeletedList ? 'Case adjourned / deleted from cause list' : undefined,
+        })),
+        deletedCasesCount: deletedCases.length,
+        activeCasesCount: activeCases.length,
+        source: 'Peshawar High Court (https://www.peshawarhighcourt.gov.pk/app/site/18/p/Current_Causelist.html)',
+      });
+      return;
     }
 
     res.json({
       success: true,
       date: dateStr,
       bench: benchName,
-      pdfUrl: matchedList?.pdfUrl || null,
-      benches: rosterBenches,
-      cases: sampleCases,
-      deletedCasesCount: sampleCases.filter((c) => c.isOnDeletedList).length,
-      activeCasesCount: sampleCases.filter((c) => !c.isOnDeletedList).length,
+      pdfUrl: matchedList.pdfUrl,
+      benches: [],
+      cases: [],
+      deletedCasesCount: 0,
+      activeCasesCount: 0,
       source: 'Peshawar High Court (https://www.peshawarhighcourt.gov.pk)',
     });
   } catch (err: unknown) {
@@ -1187,6 +1505,81 @@ app.get('/api/kpst/causelist', async (req: Request, res: Response) => {
   });
 });
 
+// Dedicated single case refresh from live Peshawar High Court cause list & search portals
+app.post('/api/phc/refresh-case', async (req: Request, res: Response) => {
+  const { caseNo, year, bench, appealNo, id } = req.body;
+  if (!caseNo || !year) {
+    res.status(400).json({ success: false, error: 'Case Number and Year are required' });
+    return;
+  }
+
+  try {
+    const cleanNo = String(caseNo).trim();
+    const cleanYr = String(year).trim();
+    const preferredBench = String(bench || 'PHC');
+    const preferredType = appealNo ? String(appealNo).split(/\s+/)[0] : undefined;
+
+    // 1. Search live cause lists directly
+    const causeListMatch = await findPhcCaseInPublishedCauseLists(cleanNo, cleanYr, preferredBench, preferredType);
+
+    // 2. Search CFMIS & Diary
+    const searchResults = await searchPhcCases(cleanNo, cleanYr);
+    let matched = searchResults.find((c) => (id && c.id === id) || (appealNo && c.appealNo === appealNo)) || searchResults[0];
+
+    if (!matched && causeListMatch) {
+      const key = id || `phc-${causeListMatch.caseNo}-${causeListMatch.year}-${Date.now()}`;
+      matched = {
+        id: key,
+        court: 'PHC',
+        appealNo: causeListMatch.fullCaseNo,
+        year: causeListMatch.year,
+        caseTitle: causeListMatch.title || causeListMatch.fullCaseNo,
+        department: 'Respondent Department / State',
+        bench: causeListMatch.justiceName.includes('&') ? 'Division Bench (DB)' : 'Single Bench (SB)',
+        justiceName: causeListMatch.justiceName,
+        courtRoom: causeListMatch.courtRoom,
+        isOnDeletedList: !!causeListMatch.isOnDeletedList,
+        advocateName: '',
+        natureOfCase: causeListMatch.caseType,
+        decision: 'Under Hearing',
+        decidedOn: '',
+        nextDate: causeListMatch.nextDate,
+        causeListSrNo: causeListMatch.srNo,
+        causeListBench: causeListMatch.causeListBench,
+        causeListPdfUrl: causeListMatch.causeListPdfUrl,
+        placeOfHearing: 'Peshawar',
+        lastUpdated: new Date().toISOString(),
+      };
+    }
+
+    if (matched && causeListMatch) {
+      matched.nextDate = causeListMatch.nextDate;
+      matched.justiceName = causeListMatch.justiceName;
+      matched.courtRoom = causeListMatch.courtRoom;
+      matched.causeListSrNo = causeListMatch.srNo;
+      matched.causeListBench = causeListMatch.causeListBench;
+      matched.causeListPdfUrl = causeListMatch.causeListPdfUrl;
+      matched.isOnDeletedList = !!causeListMatch.isOnDeletedList;
+      matched.lastUpdated = new Date().toISOString();
+    }
+
+    if (!matched) {
+      res.status(404).json({ success: false, error: 'Case not found on Peshawar High Court cause lists or search portals.' });
+      return;
+    }
+
+    res.json({
+      success: true,
+      caseData: matched,
+      causeListFound: !!causeListMatch,
+      source: 'Peshawar High Court (https://www.peshawarhighcourt.gov.pk/app/site/18/p/Current_Causelist.html)',
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, error: msg });
+  }
+});
+
 // Batch update cases
 app.post('/api/kpst/update-all', async (req: Request, res: Response) => {
   const { cases } = req.body;
@@ -1206,11 +1599,27 @@ app.post('/api/kpst/update-all', async (req: Request, res: Response) => {
       if (c.court === 'PHC' || (c.id && String(c.id).startsWith('phc-'))) {
         const numMatch = String(c.appealNo).match(/\d+/);
         const caseNo = numMatch ? numMatch[0] : c.appealNo;
+        const caseType = String(c.appealNo).split(/\s+/)[0];
+
+        // 1. Search live published cause lists from https://www.peshawarhighcourt.gov.pk/app/site/18/p/Current_Causelist.html
+        const causeListMatch = await findPhcCaseInPublishedCauseLists(
+          caseNo,
+          c.year,
+          c.causeListBench || c.placeOfHearing,
+          caseType
+        );
+
         const phcList = await searchPhcCases(caseNo, c.year);
         if (phcList.length > 0) {
           const match = phcList.find((p) => p.id === c.id || (p.appealNo && p.appealNo === c.appealNo)) || phcList[0];
-          // Requirement 4: Ensure nextDate is properly resolved and never lost
-          let resolvedNextDate = match.nextDate || c.nextDate || '';
+
+          let resolvedNextDate = causeListMatch?.nextDate || match.nextDate || c.nextDate || '';
+          let resolvedJustice = causeListMatch?.justiceName || match.justiceName || c.justiceName || '';
+          let resolvedCourtRoom = causeListMatch?.courtRoom || match.courtRoom || c.courtRoom || '';
+          let resolvedSrNo = causeListMatch?.srNo || match.causeListSrNo || c.causeListSrNo || '';
+          let resolvedBench = causeListMatch?.causeListBench || match.causeListBench || c.causeListBench || '';
+          let resolvedPdf = causeListMatch?.causeListPdfUrl || match.causeListPdfUrl || c.causeListPdfUrl || '';
+          let resolvedDeleted = causeListMatch?.isOnDeletedList ?? match.isOnDeletedList ?? c.isOnDeletedList ?? false;
 
           // If still no nextDate, query fixation history directly if caseCode exists
           const targetCode = match.caseCode || c.caseCode;
@@ -1241,7 +1650,31 @@ app.post('/api/kpst/update-all', async (req: Request, res: Response) => {
           updatedCases.push({
             ...c,
             ...match,
+            id: c.id,
             nextDate: resolvedNextDate,
+            justiceName: resolvedJustice,
+            courtRoom: resolvedCourtRoom,
+            causeListSrNo: resolvedSrNo,
+            causeListBench: resolvedBench,
+            causeListPdfUrl: resolvedPdf,
+            isOnDeletedList: resolvedDeleted,
+            court: 'PHC',
+            lastUpdated: new Date().toISOString(),
+          });
+          successCount++;
+          continue;
+        } else if (causeListMatch) {
+          // Case verified directly from Peshawar High Court Current Cause List
+          updatedCases.push({
+            ...c,
+            id: c.id,
+            nextDate: causeListMatch.nextDate,
+            justiceName: causeListMatch.justiceName,
+            courtRoom: causeListMatch.courtRoom,
+            causeListSrNo: causeListMatch.srNo,
+            causeListBench: causeListMatch.causeListBench,
+            causeListPdfUrl: causeListMatch.causeListPdfUrl,
+            isOnDeletedList: !!causeListMatch.isOnDeletedList,
             court: 'PHC',
             lastUpdated: new Date().toISOString(),
           });
@@ -1297,6 +1730,7 @@ app.post('/api/kpst/update-all', async (req: Request, res: Response) => {
         updatedCases.push({
           ...c,
           ...live,
+          id: c.id,
           bench: enhancedBench,
           causeListBench,
           causeListSrNo,
@@ -1313,9 +1747,22 @@ app.post('/api/kpst/update-all', async (req: Request, res: Response) => {
     }
   }
 
+  // Ensure all returned cases have strictly unique IDs
+  const seenIds = new Set<string>();
+  const dedupedUpdated: CaseRecord[] = [];
+  for (let i = 0; i < updatedCases.length; i++) {
+    const uc = updatedCases[i];
+    let uniqueId = uc.id;
+    if (seenIds.has(uniqueId)) {
+      uniqueId = `${uniqueId}-${i}`;
+    }
+    seenIds.add(uniqueId);
+    dedupedUpdated.push({ ...uc, id: uniqueId });
+  }
+
   res.json({
     success: true,
-    cases: updatedCases,
+    cases: dedupedUpdated,
     successCount,
     failureCount,
     timestamp: new Date().toISOString(),
@@ -1370,6 +1817,14 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://0.0.0.0:${PORT}`);
+    // Warm cause list cache in background for instant lookups
+    setTimeout(() => {
+      warmPhcCauseListsCache().catch(console.warn);
+    }, 1500);
+    // Periodically refresh cause list cache every 15 minutes
+    setInterval(() => {
+      warmPhcCauseListsCache().catch(console.warn);
+    }, 15 * 60 * 1000);
   });
 }
 
