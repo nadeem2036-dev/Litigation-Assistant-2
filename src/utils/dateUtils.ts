@@ -9,12 +9,13 @@ export function parseHearingDate(dateStr: string): Date | null {
   const trimmed = dateStr.trim();
   if (!trimmed || trimmed === '-' || trimmed.toLowerCase() === 'n/a') return null;
 
-  // Format 1: Textual, e.g. "Monday, 05OCT 2026" or "05-Oct-2026" or "5 Oct 2026"
-  const textMatch = trimmed.match(/(\d{1,2})\s*[-/]?\s*([A-Za-z]{3,9})\s*[-/]?\s*(\d{4})/);
+  // Format 1: Textual, e.g. "Monday, 05OCT 2026", "05-Oct-2026", "15-FEB-25", "5 Oct 26"
+  const textMatch = trimmed.match(/(\d{1,2})\s*[-/]?\s*([A-Za-z]{3,9})\s*[-/]?\s*(\d{2,4})/);
   if (textMatch) {
     const day = parseInt(textMatch[1], 10);
     const monthStr = textMatch[2].toUpperCase().slice(0, 3);
-    const year = parseInt(textMatch[3], 10);
+    let year = parseInt(textMatch[3], 10);
+    if (year < 100) year += 2000;
     const months: Record<string, number> = {
       JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5,
       JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11,
@@ -24,12 +25,13 @@ export function parseHearingDate(dateStr: string): Date | null {
     }
   }
 
-  // Format 2: DD-MM-YYYY or DD/MM/YYYY
-  const dmyMatch = trimmed.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
+  // Format 2: DD-MM-YYYY or DD/MM/YYYY or DD-MM-YY
+  const dmyMatch = trimmed.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$/);
   if (dmyMatch) {
     const day = parseInt(dmyMatch[1], 10);
     const month = parseInt(dmyMatch[2], 10) - 1;
-    const year = parseInt(dmyMatch[3], 10);
+    let year = parseInt(dmyMatch[3], 10);
+    if (year < 100) year += 2000;
     const d = new Date(year, month, day, 0, 0, 0);
     if (!isNaN(d.getTime())) return d;
   }

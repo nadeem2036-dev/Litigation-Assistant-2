@@ -51,12 +51,13 @@ function parseKpstDateToYMD(dateStr: string): string {
   if (!dateStr) return '';
   const str = dateStr.trim();
 
-  // Format 1: Text with month name like "Monday, 05OCT 2026" or "05-Oct-2026" or "5 Oct 2026"
-  const textMatch = str.match(/(\d{1,2})\s*[-/]?\s*([A-Za-z]{3,9})\s*[-/]?\s*(\d{4})/);
+  // Format 1: Text with month name like "Monday, 05OCT 2026", "05-Oct-2026", "15-FEB-25 02:02 PM", "5 Oct 26"
+  const textMatch = str.match(/(\d{1,2})\s*[-/]?\s*([A-Za-z]{3,9})\s*[-/]?\s*(\d{2,4})/);
   if (textMatch) {
     const day = textMatch[1].padStart(2, '0');
     const monthStr = textMatch[2].toUpperCase().slice(0, 3);
-    const year = textMatch[3];
+    let year = textMatch[3];
+    if (year.length === 2) year = `20${year}`;
     const months: Record<string, string> = {
       JAN: '01', FEB: '02', MAR: '03', APR: '04', MAY: '05', JUN: '06',
       JUL: '07', AUG: '08', SEP: '09', OCT: '10', NOV: '11', DEC: '12',
@@ -65,10 +66,12 @@ function parseKpstDateToYMD(dateStr: string): string {
     if (month) return `${year}-${month}-${day}`;
   }
 
-  // Format 2: DD-MM-YYYY or DD/MM/YYYY
-  const dmyMatch = str.match(/(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
+  // Format 2: DD-MM-YYYY or DD/MM/YYYY or DD-MM-YY
+  const dmyMatch = str.match(/(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})/);
   if (dmyMatch) {
-    return `${dmyMatch[3]}-${dmyMatch[2].padStart(2, '0')}-${dmyMatch[1].padStart(2, '0')}`;
+    let year = dmyMatch[3];
+    if (year.length === 2) year = `20${year}`;
+    return `${year}-${dmyMatch[2].padStart(2, '0')}-${dmyMatch[1].padStart(2, '0')}`;
   }
 
   // Format 3: YYYY-MM-DD
@@ -390,17 +393,18 @@ async function getOrParsePhcCauseList(
         });
       }
 
-      // Regex matching cases: srNo [whitespace] caseType [whitespace] caseNo/year
-      // e.g. 1 \t Cr.M(BA) 3096/2026 or 11 \t W.P 3806/2025
-      const caseRegex = /(\d{1,4})\s+([A-Za-z.()/-]+)\s+(\d+)\/(\d{2,4})/g;
+      // Regex matching cases: srNo [whitespace] caseType [whitespace] caseNo[-suffix]/year
+      // e.g. 1 \t Cr.M(BA) 3096/2026 or 11 \t W.P 3806-P/2025 or 2 \t CM Rest 104-P/2024
+      const caseRegex = /(\d{1,4})\s+([A-Za-z.()/-]+(?:\s+[A-Za-z.()/-]+)?)\s+(\d+)(?:-([A-Za-z]))?\/(\d{2,4})/g;
       let m;
       while ((m = caseRegex.exec(page)) !== null) {
         const srNo = m[1];
         const caseType = m[2].trim();
         const caseNo = m[3].trim();
-        const rawYear = m[4].trim();
+        const suffix = m[4] ? m[4].trim() : '';
+        const rawYear = m[5].trim();
         const year = rawYear.length === 2 ? `20${rawYear}` : rawYear;
-        const fullCaseNo = `${caseType} ${caseNo}/${year}`;
+        const fullCaseNo = suffix ? `${caseType} ${caseNo}-${suffix}/${year}` : `${caseType} ${caseNo}/${year}`;
 
         const idx = m.index;
         const contextBefore = page.substring(Math.max(0, idx - 450), idx);
@@ -421,7 +425,7 @@ async function getOrParsePhcCauseList(
           nextDate: dateYMD,
           causeListBench: benchName,
           causeListPdfUrl: pdfUrl,
-          title: title || `${caseType} ${caseNo}/${year}`,
+          title: title || fullCaseNo,
           isOnDeletedList: isDeletedSection,
         };
 
@@ -431,6 +435,11 @@ async function getOrParsePhcCauseList(
         const numKey = `${caseNo}/${year}`;
         caseMap.set(numKey, caseItem);
         caseMap.set(`${caseNo}/${year.slice(-2)}`, caseItem);
+        if (suffix) {
+          caseMap.set(`${caseNo}-${suffix}/${year}`, caseItem);
+          caseMap.set(`${caseNo}-${suffix}/${year.slice(-2)}`, caseItem);
+          caseMap.set(`${caseType} ${caseNo}-${suffix}/${year}`.toLowerCase(), caseItem);
+        }
         const normPrefix = caseType.toLowerCase().replace(/[^a-z0-9]/g, '');
         caseMap.set(`${normPrefix}${caseNo}/${year}`, caseItem);
         caseMap.set(`${normPrefix} ${caseNo}/${year}`, caseItem);
